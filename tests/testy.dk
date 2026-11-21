@@ -1,0 +1,214 @@
+# Testy wrappera PCRE2: build.py podstawia ten plik w miejsce app/app.dk.
+# Każde sprawdzenie wypisuje PASS albo FAIL; kod zakończenia to liczba błędów.
+import core.containers.*;
+import regex;
+
+fun sprawdz(warunek: bool, nazwa: str) -> i64 = {
+    if (warunek) {
+        print(f"PASS {nazwa}\n");
+        return 0;
+    }
+    print(f"FAIL {nazwa}\n");
+    return 1;
+}
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun zawiera(calosc: str, fragment: str) -> bool = {
+    var i: i64 = 0;
+    while (i + fragment.length() <= calosc.length()) {
+        var zgodne = true;
+        var j: i64 = 0;
+        while (j < fragment.length()) {
+            if (calosc[i + j] != fragment[j]) zgodne = false;
+            j += 1;
+        }
+        if (zgodne) return true;
+        i += 1;
+    }
+    return false;
+}
+
+fun grupa(d: ref regex.Dopasowanie, n: i64, poczatek: i64, koniec: i64, tekst: str) -> bool = {
+    if (n >= d.grupy.length()) return false;
+    let g = d.grupy.at(n);
+    return g.uczestniczy and g.poczatek == poczatek and g.koniec == koniec and rowne(g.tekst.asSlice(), tekst);
+}
+
+fun testyKompilacji() -> i64 = {
+    var b: i64 = 0;
+    let wersja = regex.wersjaBiblioteki();
+    print(f"  (biblioteka: PCRE2 {wersja.asSlice()})\n");
+    b += sprawdz(wersja.length() >= 4 and wersja.asSlice()[0] == '1', "wersja biblioteki dostepna (10.x)");
+    var w = regex.kompiluj("(\\w+)@(\\w+)\\.(pl|com)", regex.BEZ_OPCJI);
+    b += sprawdz(w.ok and w.grupy == 3 and regex.aktywny(&w), "kompilacja: 3 grupy przechwytujace");
+    regex.zwolnij(&w);
+    var nawias = regex.kompiluj("abc(def", regex.BEZ_OPCJI);
+    b += sprawdz(not nawias.ok and nawias.blad.kod == 114 and nawias.blad.pozycja == 7 and zawiera(nawias.blad.opis.asSlice(), "parenthesis"), "brak nawiasu zamykajacego: kod 114, pozycja 7, opis");
+    var kwantyfikator = regex.kompiluj("a{3,1}", regex.BEZ_OPCJI);
+    b += sprawdz(not kwantyfikator.ok and kwantyfikator.blad.kod == 104 and kwantyfikator.blad.pozycja == 5, "a{3,1}: kod 104 (liczby w zlej kolejnosci), pozycja 5");
+    var zakres = regex.kompiluj("[z-a]", regex.BEZ_OPCJI);
+    b += sprawdz(not zakres.ok and zakres.blad.kod == 108 and zakres.blad.pozycja == 3, "[z-a]: kod 108 (zly zakres w klasie), pozycja 3");
+    var pusty = regex.kompiluj("", regex.BEZ_OPCJI);
+    var dp = regex.dopasuj(&pusty, "abc", 1);
+    b += sprawdz(pusty.ok and dp.znaleziono and grupa(&dp, 0, 1, 1, ""), "pusty wzorzec pasuje pustym fragmentem w miejscu startu");
+    regex.zwolnij(&pusty);
+    var zleOpcje = regex.kompiluj("a", 1);
+    b += sprawdz(not zleOpcje.ok and zleOpcje.blad.kod == regex.ZLE_OPCJE, "nieobslugiwana opcja odrzucona przez wrapper");
+    var zlyUtf: String;
+    zlyUtf.append("a");
+    zlyUtf.append(192u8 as char);
+    zlyUtf.append("b");
+    var wzUtf = regex.kompiluj(zlyUtf.asSlice(), regex.UTF8);
+    b += sprawdz(not wzUtf.ok and wzUtf.blad.kod < 0 and wzUtf.blad.pozycja == 1, "niepoprawny UTF-8 we wzorcu (tryb UTF-8): blad z pozycja 1");
+    return b;
+}
+
+fun testyGrup() -> i64 = {
+    var b: i64 = 0;
+    var w = regex.kompiluj("(\\w+)@(\\w+)\\.(pl|com)", regex.BEZ_OPCJI);
+    let tekst = "kontakt: jan@firma.pl, ola@szkola.com";
+    var d = regex.dopasuj(&w, tekst, 0);
+    b += sprawdz(d.ok and d.znaleziono and d.grupy.length() == 4, "dopasowanie: grupa 0 i 3 grupy");
+    b += sprawdz(grupa(&d, 0, 9, 21, "jan@firma.pl") and grupa(&d, 1, 9, 12, "jan") and grupa(&d, 2, 13, 18, "firma") and grupa(&d, 3, 19, 21, "pl"), "zakresy i teksty grup (w bajtach, polotwarte)");
+    var dalej = regex.dopasuj(&w, tekst, 21);
+    b += sprawdz(grupa(&dalej, 0, 23, 37, "ola@szkola.com") and grupa(&dalej, 3, 34, 37, "com"), "dopasowanie od pozycji startowej 21");
+    let lista = regex.wszystkie(&w, tekst);
+    b += sprawdz(lista.length() == 2 and rowne(lista.at(1).grupy.at(1).tekst.asSlice(), "ola"), "wszystkie dopasowania: 2");
+    var brak = regex.dopasuj(&w, "brak adresow", 0);
+    b += sprawdz(brak.ok and not brak.znaleziono and brak.grupy.length() == 0, "brak dopasowania: ok = true, znaleziono = false (to nie blad)");
+    regex.zwolnij(&w);
+    var alt = regex.kompiluj("(a)|(b)", regex.BEZ_OPCJI);
+    var ab = regex.dopasuj(&alt, "xb", 0);
+    b += sprawdz(ab.znaleziono and not ab.grupy.at(1).uczestniczy and ab.grupy.at(1).poczatek == -1 and grupa(&ab, 2, 1, 2, "b"), "(a)|(b) na 'xb': grupa 1 bez udzialu (-1), grupa 2 = 'b'");
+    regex.zwolnij(&alt);
+    var opcjonalna = regex.kompiluj("(x)?(y)(z?)", regex.BEZ_OPCJI);
+    var oy = regex.dopasuj(&opcjonalna, "y", 0);
+    b += sprawdz(not oy.grupy.at(1).uczestniczy and grupa(&oy, 2, 0, 1, "y") and grupa(&oy, 3, 1, 1, ""), "grupa bez udzialu odroznia sie od grupy z pustym dopasowaniem");
+    regex.zwolnij(&opcjonalna);
+    var koncowa = regex.kompiluj("(a)(b)?", regex.BEZ_OPCJI);
+    var ka = regex.dopasuj(&koncowa, "a", 0);
+    b += sprawdz(ka.grupy.length() == 3 and grupa(&ka, 1, 0, 1, "a") and not ka.grupy.at(2).uczestniczy, "ostatnia grupa bez udzialu tez jest w wyniku (lista ma 1 + liczba grup)");
+    regex.zwolnij(&koncowa);
+    var nazwana = regex.kompiluj("(?<rok>\\d{4})-(?<miesiac>\\d{2})", regex.BEZ_OPCJI);
+    var dn = regex.dopasuj(&nazwana, "data 2026-11", 0);
+    b += sprawdz(regex.numerGrupy(&nazwana, "rok") == 1 and regex.numerGrupy(&nazwana, "miesiac") == 2 and regex.numerGrupy(&nazwana, "dzien") == -1
+        and rowne(regex.tekstGrupy(&dn, regex.numerGrupy(&nazwana, "miesiac")).asSlice(), "11"), "grupy nazwane: numery i tekst; nieznana nazwa = -1");
+    regex.zwolnij(&nazwana);
+    return b;
+}
+
+fun testyUtf8() -> i64 = {
+    var b: i64 = 0;
+    var o = regex.kompiluj("ó", regex.UTF8);
+    var d = regex.dopasuj(&o, "Zażółć", 0);
+    b += sprawdz(grupa(&d, 0, 4, 6, "ó"), "UTF-8: 'ó' w 'Zażółć' na bajtach [4, 6), choc to 4. znak");
+    regex.zwolnij(&o);
+    var dwaZnaki = regex.kompiluj("^..", regex.UTF8);
+    var dz = regex.dopasuj(&dwaZnaki, "żółw", 0);
+    b += sprawdz(grupa(&dz, 0, 0, 4, "żó"), "tryb UTF-8: '.' to caly znak (2 znaki = 4 bajty)");
+    regex.zwolnij(&dwaZnaki);
+    var bajty = regex.kompiluj("^..", regex.BEZ_OPCJI);
+    var db = regex.dopasuj(&bajty, "żółw", 0);
+    b += sprawdz(db.znaleziono and db.grupy.at(0).koniec == 2 and db.grupy.at(0).tekst.length() == 2, "bez UTF-8: '.' to jeden bajt (2 bajty = 1 polska litera)");
+    regex.zwolnij(&bajty);
+    var wielkosc = regex.kompiluj("żółw", regex.UTF8 | regex.BEZ_WIELKOSCI_LITER);
+    var dw = regex.dopasuj(&wielkosc, "ŻÓŁW", 0);
+    b += sprawdz(dw.znaleziono and dw.grupy.at(0).koniec == 7, "UTF-8 bez wielkosci liter: 'żółw' pasuje do 'ŻÓŁW'");
+    regex.zwolnij(&wielkosc);
+    var slowo = regex.kompiluj("\\w+", regex.UTF8 | regex.KLASY_UNICODE);
+    var ds = regex.dopasuj(&slowo, "  źdźbło!", 0);
+    b += sprawdz(grupa(&ds, 0, 2, 11, "źdźbło"), "klasy Unicode: \\w obejmuje polskie litery");
+    regex.zwolnij(&slowo);
+    var w = regex.kompiluj("c", regex.UTF8);
+    var zly: String;
+    zly.append("ab");
+    zly.append(255u8 as char);
+    zly.append("cd");
+    var dzl = regex.dopasuj(&w, zly.asSlice(), 0);
+    b += sprawdz(not dzl.ok and dzl.kodBledu <= -3 and dzl.kodBledu >= -23 and dzl.pozycjaBledu == 2 and dzl.blad.length() > 5, "niepoprawny UTF-8 w tekscie: blad z kodem UTF-8, opisem i bajtem 2");
+    print(f"  ({dzl.blad.asSlice()})\n");
+    var uciety: String;
+    uciety.append("abc");
+    uciety.append(197u8 as char);
+    var du = regex.dopasuj(&w, uciety.asSlice(), 0);
+    b += sprawdz(not du.ok and du.pozycjaBledu == 3, "ucieta litera na koncu tekstu: blad na bajcie 3");
+    var srodek = regex.dopasuj(&w, "żc", 1);
+    b += sprawdz(not srodek.ok and srodek.kodBledu == regex.BLEDNE_PRZESUNIECIE_UTF, "start w srodku znaku UTF-8: blad -36");
+    var bezUtf = regex.kompiluj("c", regex.BEZ_OPCJI);
+    var dbu = regex.dopasuj(&bezUtf, zly.asSlice(), 0);
+    b += sprawdz(dbu.ok and grupa(&dbu, 0, 3, 4, "c"), "bez trybu UTF-8 bajt 0xFF jest zwyklym bajtem");
+    regex.zwolnij(&bezUtf);
+    regex.zwolnij(&w);
+    var puste = regex.kompiluj("", regex.UTF8);
+    let lista = regex.wszystkie(&puste, "żb");
+    b += sprawdz(lista.length() == 3 and lista.at(1).grupy.at(0).poczatek == 2 and lista.at(2).grupy.at(0).poczatek == 3, "puste dopasowania w UTF-8: przesuniecie o caly znak (0, 2, 3), petla sie konczy");
+    regex.zwolnij(&puste);
+    var gwiazdka = regex.kompiluj("x*", regex.BEZ_OPCJI);
+    let lg = regex.wszystkie(&gwiazdka, "axxb");
+    b += sprawdz(lg.length() == 4 and rowne(lg.at(1).grupy.at(0).tekst.asSlice(), "xx"), "x* na 'axxb': puste, 'xx', puste, puste");
+    regex.zwolnij(&gwiazdka);
+    return b;
+}
+
+fun testyPamieci() -> i64 = {
+    var b: i64 = 0;
+    var w = regex.kompiluj("(\\d+)", regex.BEZ_OPCJI);
+    var pierwszy = regex.dopasuj(&w, "numer 123", 0);
+    var drugi = regex.dopasuj(&w, "inny 98765", 0);
+    b += sprawdz(rowne(pierwszy.grupy.at(1).tekst.asSlice(), "123") and rowne(drugi.grupy.at(1).tekst.asSlice(), "98765"), "kolejne dopasowanie nie zmienia poprzedniego wyniku");
+    b += sprawdz(regex.zwolnij(&w), "zwolnienie wzorca");
+    b += sprawdz(rowne(pierwszy.grupy.at(1).tekst.asSlice(), "123") and pierwszy.grupy.at(1).poczatek == 6, "wynik jest kopia: dostepny po zwolnieniu wzorca");
+    var poZwolnieniu = regex.dopasuj(&w, "123", 0);
+    b += sprawdz(not poZwolnieniu.ok and poZwolnieniu.kodBledu == regex.ZWOLNIONY, "dopasowanie zwolnionym wzorcem: blad, bez awarii");
+    b += sprawdz(not regex.zwolnij(&w), "ponowne zwolnienie zwraca false");
+    var zly = regex.kompiluj("(", regex.BEZ_OPCJI);
+    b += sprawdz(not regex.zwolnij(&zly), "wzorzec z bledem kompilacji nie ma czego zwalniac");
+    var z = regex.kompiluj("a", regex.BEZ_OPCJI);
+    var poza = regex.dopasuj(&z, "abc", 4);
+    var ujemny = regex.dopasuj(&z, "abc", -1);
+    var naKoncu = regex.dopasuj(&z, "abc", 3);
+    b += sprawdz(not poza.ok and not ujemny.ok and naKoncu.ok and not naKoncu.znaleziono, "start poza tekstem odrzucony; start na koncu tekstu dozwolony");
+    var nul: String;
+    nul.append("x");
+    nul.append('\0');
+    nul.append("y");
+    var zNul = regex.kompiluj(nul.asSlice(), regex.BEZ_OPCJI);
+    var tekstNul: String;
+    tekstNul.append("--x");
+    tekstNul.append('\0');
+    tekstNul.append("y--");
+    var dnul = regex.dopasuj(&zNul, tekstNul.asSlice(), 0);
+    b += sprawdz(zNul.ok and dnul.znaleziono and dnul.grupy.at(0).poczatek == 2 and dnul.grupy.at(0).koniec == 5, "bajt NUL we wzorcu i tekscie (jawna dlugosc, nie koniec napisu C)");
+    regex.zwolnij(&zNul);
+    regex.zwolnij(&z);
+    var wiele: i64 = 0;
+    var k: i64 = 0;
+    while (k < 2000) {
+        var t = regex.kompiluj("(a+)(b*)", regex.UTF8);
+        var dt = regex.dopasuj(&t, "xxaaabb", 0);
+        if (dt.znaleziono and dt.grupy.at(1).koniec == 5) wiele += 1;
+        regex.zwolnij(&t);
+        k += 1;
+    }
+    b += sprawdz(wiele == 2000, "2000 cykli kompilacja - dopasowanie - zwolnienie");
+    return b;
+}
+
+fun main() -> i64 = {
+    var bledy: i64 = 0;
+    bledy += testyKompilacji();
+    bledy += testyGrup();
+    bledy += testyUtf8();
+    bledy += testyPamieci();
+    print(f"Bledy: {bledy}\n");
+    return bledy;
+}

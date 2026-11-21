@@ -1,0 +1,7 @@
+2026-11-20 08:15:02 INFO  użytkownik=jan.kowalski akcja=logowanie czas=120ms
+2026-11-20 08:15:09 WARN  użytkownik=zofia akcja=płatność czas=2300ms kwota=149.99
+2026-11-20 08:16:44 ERROR użytkownik=jan.kowalski akcja=płatność błąd="brak środków"
+2026-11-20 08:17:01 INFO  użytkownik=łukasz akcja=wylogowanie czas=15ms
+2026-11-20 08:17:30 INFO  użytkownik=�� akcja=logowanie czas=40ms
+2026-11-20 08:18:12 ERROR użytkownik=żaneta akcja=eksport błąd="przekroczono limit"
+2026-11-20 08:19:55 INFO  użytkownik=zofia akcja=logowanie czas=98ms

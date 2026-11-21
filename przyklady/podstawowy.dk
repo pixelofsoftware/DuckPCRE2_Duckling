@@ -1,0 +1,85 @@
+#{
+    Przykład podstawowy: kompilacja wzorca, dopasowanie, grupy i błędy przez publiczne API.
+
+    1. Daty RRRR-MM-DD w tekście: całe dopasowanie i trzy grupy z pozycjami (w bajtach),
+       potem wszystkie dopasowania w tekście.
+    2. Grupa, która nie wzięła udziału w dopasowaniu, i brak dopasowania.
+    3. Polskie litery w trybie UTF-8: pozycje w bajtach, a nie w znakach; dopasowanie bez
+       wielkości liter.
+    4. Kontrolowane błędy: niepoprawny wzorzec (kod, opis, pozycja) i niepoprawny UTF-8.
+    Kod zakończenia: liczba niezgodności (0 = wszystko jak oczekiwano).
+#}
+import core.containers.*;
+import regex;
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun main() -> i64 = {
+    var bledy: i64 = 0;
+    let wersja = regex.wersjaBiblioteki();
+    print(f"PCRE2 {wersja.asSlice()}\n");
+
+    # 1. Grupy.
+    var daty = regex.kompiluj("(\\d{4})-(\\d{2})-(\\d{2})", regex.UTF8);
+    print(f"Wzorzec {daty.zrodlo.asSlice()}: {daty.grupy} grupy\n");
+    let tekst = "Zamowienie z 2026-11-20, wysylka 2026-11-24.";
+    var d = regex.dopasuj(&daty, tekst, 0);
+    print(f"Pierwsze dopasowanie [{d.grupy.at(0).poczatek}, {d.grupy.at(0).koniec}): '{d.grupy.at(0).tekst.asSlice()}'; rok '{d.grupy.at(1).tekst.asSlice()}', miesiac '{d.grupy.at(2).tekst.asSlice()}', dzien '{d.grupy.at(3).tekst.asSlice()}'\n");
+    if (not d.znaleziono or d.grupy.at(0).poczatek != 13 or not rowne(d.grupy.at(3).tekst.asSlice(), "20")) bledy += 1;
+    let wszystkie = regex.wszystkie(&daty, tekst);
+    print(f"Wszystkie daty: {wszystkie.length()}");
+    var i: i64 = 0;
+    while (i < wszystkie.length()) {
+        print(f" '{wszystkie.at(i).grupy.at(0).tekst.asSlice()}'");
+        i += 1;
+    }
+    print("\n");
+    if (wszystkie.length() != 2) bledy += 1;
+
+    # 2. Grupa bez udziału i brak dopasowania.
+    var wybor = regex.kompiluj("(kot)|(pies)", regex.BEZ_OPCJI);
+    var p = regex.dopasuj(&wybor, "mamy psa i pies szczeka", 0);
+    print(f"(kot)|(pies): grupa 1 uczestniczy: {p.grupy.at(1).uczestniczy} (pozycja {p.grupy.at(1).poczatek}), grupa 2: '{p.grupy.at(2).tekst.asSlice()}' na bajtach [{p.grupy.at(2).poczatek}, {p.grupy.at(2).koniec})\n");
+    if (p.grupy.at(1).uczestniczy or not p.grupy.at(2).uczestniczy) bledy += 1;
+    var brak = regex.dopasuj(&wybor, "tylko ryby", 0);
+    print(f"Brak dopasowania: ok={brak.ok}, znaleziono={brak.znaleziono}\n");
+    if (not brak.ok or brak.znaleziono) bledy += 1;
+
+    # 3. UTF-8: pozycje w bajtach.
+    var litera = regex.kompiluj("ó", regex.UTF8);
+    var u = regex.dopasuj(&litera, "Zażółć", 0);
+    print(f"'ó' w 'Zażółć': bajty [{u.grupy.at(0).poczatek}, {u.grupy.at(0).koniec}) - to 4. znak, ale bajt 4, bo 'ż' zajmuje 2 bajty\n");
+    if (u.grupy.at(0).poczatek != 4 or u.grupy.at(0).koniec != 6) bledy += 1;
+    var wielkie = regex.kompiluj("żółw", regex.UTF8 | regex.BEZ_WIELKOSCI_LITER);
+    var z = regex.dopasuj(&wielkie, "Uwaga: ŻÓŁW na drodze", 0);
+    print(f"żółw bez wielkosci liter w 'Uwaga: ŻÓŁW na drodze': '{z.grupy.at(0).tekst.asSlice()}'\n");
+    if (not z.znaleziono) bledy += 1;
+
+    # 4. Błędy.
+    var zly = regex.kompiluj("abc(def", regex.BEZ_OPCJI);
+    print(f"Niepoprawny wzorzec 'abc(def': kod {zly.blad.kod}, '{zly.blad.opis.asSlice()}', pozycja {zly.blad.pozycja}\n");
+    if (zly.ok or zly.blad.kod != 114) bledy += 1;
+    var niepoprawny: String;
+    niepoprawny.append("ab");
+    niepoprawny.append(255u8 as char);
+    niepoprawny.append("cd");
+    var e = regex.dopasuj(&daty, niepoprawny.asSlice(), 0);
+    print(f"Tekst z bajtem 0xFF w trybie UTF-8: ok={e.ok}, kod {e.kodBledu}, '{e.blad.asSlice()}', bajt {e.pozycjaBledu}\n");
+    if (e.ok or e.pozycjaBledu != 2) bledy += 1;
+
+    regex.zwolnij(&daty);
+    regex.zwolnij(&wybor);
+    regex.zwolnij(&litera);
+    regex.zwolnij(&wielkie);
+    print(f"Wyniki po zwolnieniu wzorcow nadal sa kopiami: '{d.grupy.at(0).tekst.asSlice()}'\n");
+    print(f"Niezgodnosci: {bledy}\n");
+    return bledy;
+}

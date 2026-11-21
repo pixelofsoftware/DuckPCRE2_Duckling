@@ -1,0 +1,126 @@
+#{
+    Praktyczne zastosowanie wrappera: wyszukiwarka w plikach logów z odczytem grup.
+
+    Program czyta ze standardowego wejścia trzy wiersze:
+      1. wyrażenie regularne (składnia PCRE2),
+      2. plik tekstowy (np. log),
+      3. opcje literami (pusty wiersz = "u"): u - UTF-8 ze sprawdzaniem, i - bez wielkości
+         liter, w - klasy Unicode (\w, \d według Unicode), x - spacje we wzorcu ignorowane.
+    Dla każdego pasującego wiersza wypisuje numer wiersza, wiersz i grupy z pozycjami
+    w bajtach. Wiersze z niepoprawnym UTF-8 są zgłaszane i pomijane (tryb u).
+    Kod zakończenia: 0 - są dopasowania, 1 - brak dopasowań, 2 - zły wzorzec lub opcje,
+    3 - błąd pliku.
+#}
+import core.containers.*;
+import core.primitive_io as io;
+import regex;
+import pliki;
+
+class Wiersz {
+    tekst: String;
+    jest: bool = false;
+}
+
+fun czytajWiersz() -> Wiersz = {
+    var w: Wiersz;
+    var znak = io.readCharCode();
+    if (znak < 0) return w;
+    w.jest = true;
+    while (znak >= 0 and znak != '\n' as i32) {
+        if (znak != '\r' as i32) w.tekst.append(znak as char);
+        znak = io.readCharCode();
+    }
+    return w;
+}
+
+fun linie(zawartosc: str) -> List[String] = {
+    var wynik: List[String];
+    var biezaca: String;
+    var i: i64 = 0;
+    while (i < zawartosc.length()) {
+        let z = zawartosc[i];
+        if (z == '\n') {
+            wynik.push(copy biezaca);
+            biezaca.clear();
+        } else if (z != '\r') {
+            biezaca.append(z);
+        }
+        i += 1;
+    }
+    if (biezaca.length() > 0) wynik.push(copy biezaca);
+    return wynik;
+}
+
+fun main() -> i64 = {
+    let wersja = regex.wersjaBiblioteki();
+    print(f"Wyszukiwarka w logach (wrapper PCRE2 {wersja.asSlice()}). Podaj: wzorzec, plik, opcje (u, i, w, x).\n");
+    let wzorzecTekst = czytajWiersz();
+    let plik = czytajWiersz();
+    let litery = czytajWiersz();
+    if (not wzorzecTekst.jest or not plik.jest or plik.tekst.length() == 0) {
+        print("Blad: podaj wzorzec i plik w osobnych wierszach.\n");
+        return 2;
+    }
+    var opcje: i64 = regex.UTF8;
+    if (litery.jest and litery.tekst.length() > 0) {
+        opcje = 0;
+        var i: i64 = 0;
+        while (i < litery.tekst.length()) {
+            let z = litery.tekst.asSlice()[i];
+            if (z == 'u') opcje = opcje | regex.UTF8;
+            else if (z == 'i') opcje = opcje | regex.BEZ_WIELKOSCI_LITER;
+            else if (z == 'w') opcje = opcje | regex.KLASY_UNICODE | regex.UTF8;
+            else if (z == 'x') opcje = opcje | regex.ROZSZERZONY;
+            else {
+                print(f"Blad: nieznana opcja '{z}' (u, i, w, x).\n");
+                return 2;
+            }
+            i += 1;
+        }
+    }
+    var w = regex.kompiluj(wzorzecTekst.tekst.asSlice(), opcje);
+    if (not w.ok) {
+        print(f"Blad wzorca (kod {w.blad.kod}): {w.blad.opis.asSlice()}\n");
+        print(f"  {wzorzecTekst.tekst.asSlice()}\n  ");
+        var k: i64 = 0;
+        while (k < w.blad.pozycja) { print(" "); k += 1; }
+        print(f"^ pozycja {w.blad.pozycja} (w bajtach)\n");
+        return 2;
+    }
+    let odczyt = pliki.wczytaj(plik.tekst.asSlice());
+    if (not odczyt.ok) {
+        regex.zwolnij(&w);
+        print(f"Blad: {odczyt.blad.asSlice()}\n");
+        return 3;
+    }
+    let wiersze = linie(odczyt.tresc.asSlice());
+    var pasujace: i64 = 0;
+    var bledyUtf: i64 = 0;
+    var n: i64 = 0;
+    while (n < wiersze.length()) {
+        let wiersz = wiersze.at(n).asSlice();
+        let d = regex.dopasuj(&w, wiersz, 0);
+        if (not d.ok) {
+            bledyUtf += 1;
+            print(f"  {n + 1}: [pominieto - {d.blad.asSlice()}, bajt {d.pozycjaBledu}]\n");
+        } else if (d.znaleziono) {
+            pasujace += 1;
+            print(f"  {n + 1}: {wiersz}\n");
+            print(f"      dopasowanie [{d.grupy.at(0).poczatek}, {d.grupy.at(0).koniec}) '{d.grupy.at(0).tekst.asSlice()}'\n");
+            var g: i64 = 1;
+            while (g < d.grupy.length()) {
+                if (d.grupy.at(g).uczestniczy) {
+                    print(f"      grupa {g} [{d.grupy.at(g).poczatek}, {d.grupy.at(g).koniec}) '{d.grupy.at(g).tekst.asSlice()}'\n");
+                } else {
+                    print(f"      grupa {g}: nie wziela udzialu w dopasowaniu\n");
+                }
+                g += 1;
+            }
+        }
+        n += 1;
+    }
+    regex.zwolnij(&w);
+    print(f"Pasujace wiersze: {pasujace} z {wiersze.length()}; pominiete z powodu niepoprawnego UTF-8: {bledyUtf}\n");
+    if (pasujace > 0) return 0;
+    return 1;
+}

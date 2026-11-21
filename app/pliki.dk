@@ -1,0 +1,65 @@
+#{
+    Odczyt całego pliku tekstowego przez funkcje standardowej biblioteki C (fopen, fread,
+    fclose). Są takie same na Linuksie i macOS, więc moduł nie zależy od stałych systemowych.
+    Sprawdzamy wynik każdej operacji i ograniczamy rozmiar pliku.
+#}
+import core.containers.*;
+import core.builtins as builtins;
+
+extern("C") {
+    fundecl fopen(sciezka: cptr char, tryb: cptr char) -> cptr u8;
+    fundecl fread(bufor: cptr u8, rozmiar: u64, ile: u64, plik: cptr u8) -> u64;
+    fundecl ferror(plik: cptr u8) -> i32;
+    fundecl fclose(plik: cptr u8) -> i32;
+}
+
+const MAKS_ROZMIAR: i64 = 16777216;    # 16 MiB
+const PORCJA: i64 = 4096;
+
+class Odczyt {
+    ok: bool = false;
+    tresc: String;
+    blad: String;
+}
+
+fun wczytaj(sciezka: str) -> Odczyt = {
+    var wynik: Odczyt;
+    var nazwa: String;
+    nazwa.append(sciezka);
+    nazwa.append('\0');
+    let plik = fopen(builtins.ptr_from_slice[char](nazwa.asSlice()) as cptr char,
+                     builtins.ptr_from_slice[char]("rb\0") as cptr char);
+    if (plik as u64 == 0u64) {
+        wynik.blad.append(f"nie mozna otworzyc pliku {sciezka} (brak pliku albo brak dostepu)");
+        return wynik;
+    }
+    var bufor: u8[PORCJA];
+    var koniec = false;
+    var poprawny = true;
+    while (poprawny and not koniec) {
+        let n = fread(&bufor[0] as cptr u8, 1u64, PORCJA as u64, plik) as i64;
+        if (n < PORCJA) {
+            koniec = true;
+            if (ferror(plik) != 0i32) {
+                poprawny = false;
+                wynik.blad.append(f"blad odczytu pliku {sciezka}");
+            }
+        }
+        if (wynik.tresc.length() + n > MAKS_ROZMIAR) {
+            poprawny = false;
+            wynik.blad.append(f"plik {sciezka} jest wiekszy niz {MAKS_ROZMIAR} bajtow");
+        } else {
+            var i: i64 = 0;
+            while (i < n) {
+                wynik.tresc.append(bufor[i] as char);
+                i += 1;
+            }
+        }
+    }
+    if (fclose(plik) != 0i32 and poprawny) {
+        poprawny = false;
+        wynik.blad.append(f"blad zamkniecia pliku {sciezka}");
+    }
+    wynik.ok = poprawny;
+    return wynik;
+}

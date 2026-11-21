@@ -1,0 +1,319 @@
+#{
+    regex: wrapper biblioteki PCRE2 (8-bitowe API) dla Ducklinga - wyrażenia regularne,
+    dopasowania i grupy przechwytujące.
+
+    POZYCJE W TEKŚCIE SĄ LICZONE W BAJTACH, a nie w znakach. W UTF-8 polska litera zajmuje
+    2 bajty, więc w "Zażółć" litera "ż" zaczyna się na pozycji 2 i kończy na 4 (bajty 2-3),
+    a "ó" zaczyna się na pozycji 4. Zakres [poczatek, koniec) jest półotwarty.
+
+    Grupy: grupa 0 to całe dopasowanie, grupy 1..N to kolejne nawiasy przechwytujące.
+    Grupa, która nie wzięła udziału w dopasowaniu (np. w "(a)|(b)" przy tekście "b" grupa 1),
+    ma uczestniczy = false, poczatek = koniec = -1 i pusty tekst - to co innego niż grupa,
+    która dopasowała pusty fragment (uczestniczy = true, tekst pusty).
+
+    Tryb UTF-8 (opcja UTF8): wzorzec i każdy tekst są sprawdzane; niepoprawny UTF-8 we wzorcu
+    daje błąd kompilacji, a w tekście błąd dopasowania z kodem, opisem i pozycją (w bajtach)
+    pierwszego błędnego znaku (z pcre2_get_startchar). Bez opcji UTF8 tekst jest ciągiem bajtów.
+
+    Kto zwalnia pamięć: obiekt Wzorzec trzyma skompilowany wzorzec i bufor dopasowania
+    PCRE2; wywołujący musi raz wywołać zwolnij(&wzorzec). Wzorca nie należy kopiować (kopia
+    wskazywałaby ten sam wzorzec PCRE2). Wyniki (Dopasowanie, Grupa) są kopiami: przesunięcia
+    i teksty grup są przepisane do zwykłych wartości Ducklinga, więc nie zależą od bufora,
+    który kolejne dopasowanie nadpisuje, ani od zwolnienia wzorca.
+
+    Uchwyty PCRE2 przechowujemy jako u64 (w ABI 64-bitowych systemów wskaźnik i u64
+    przekazuje się tak samo), dzięki czemu NULL to 0 i wrapper nie potrzebuje kodu w C.
+    Wariant DVM nie jest obsługiwany.
+#}
+import core.containers.*;
+import core.builtins as builtins;
+
+extern("C") {
+    fundecl pcre2_compile_8(wzorzec: cptr char, dlugosc: u64, opcje: u32, kodBledu: cptr i32, pozycjaBledu: cptr u64, kontekst: u64) -> u64;
+    fundecl pcre2_code_free_8(kod: u64) -> ();
+    fundecl pcre2_match_data_create_from_pattern_8(kod: u64, kontekst: u64) -> u64;
+    fundecl pcre2_match_data_free_8(dane: u64) -> ();
+    fundecl pcre2_match_8(kod: u64, tekst: cptr char, dlugosc: u64, start: u64, opcje: u32, dane: u64, kontekst: u64) -> i32;
+    fundecl pcre2_get_ovector_pointer_8(dane: u64) -> cptr u64;
+    fundecl pcre2_get_ovector_count_8(dane: u64) -> u32;
+    fundecl pcre2_get_startchar_8(dane: u64) -> u64;
+    fundecl pcre2_get_error_message_8(kod: i32, bufor: cptr u8, rozmiar: u64) -> i32;
+    fundecl pcre2_pattern_info_8(kod: u64, co: u32, gdzie: cptr u32) -> i32;
+    fundecl pcre2_substring_number_from_name_8(kod: u64, nazwa: cptr char) -> i32;
+    fundecl pcre2_config_8(co: u32, gdzie: cptr u8) -> i32;
+}
+
+# Opcje kompilacji (można łączyć operatorem |).
+const BEZ_OPCJI: i64 = 0;
+const BEZ_WIELKOSCI_LITER: i64 = 8;          # PCRE2_CASELESS
+const KROPKA_WSZYSTKO: i64 = 32;             # PCRE2_DOTALL: '.' dopasowuje też znak nowego wiersza
+const ROZSZERZONY: i64 = 128;                # PCRE2_EXTENDED: spacje we wzorcu ignorowane
+const WIELOLINIOWY: i64 = 1024;              # PCRE2_MULTILINE: ^ i $ przy każdym wierszu
+const KLASY_UNICODE: i64 = 131072;           # PCRE2_UCP: \w, \d, \b według Unicode
+const UTF8: i64 = 524288;                    # PCRE2_UTF: tryb UTF-8 ze sprawdzaniem tekstu
+const ZAKOTWICZONY: i64 = 2147483648;        # PCRE2_ANCHORED
+const DOZWOLONE_OPCJE: i64 = 2148140200;     # suma powyższych
+
+# Kody wyników PCRE2 używane przez wrapper.
+const BRAK_DOPASOWANIA: i64 = -1;            # PCRE2_ERROR_NOMATCH
+const BLAD_UTF8_OD: i64 = -23;               # PCRE2_ERROR_UTF8_ERR21
+const BLAD_UTF8_DO: i64 = -3;                # PCRE2_ERROR_UTF8_ERR1
+const BLEDNE_PRZESUNIECIE_UTF: i64 = -36;    # PCRE2_ERROR_BADUTFOFFSET
+const NIEUSTAWIONE: u64 = 18446744073709551615u64;   # PCRE2_UNSET
+const PCRE2_INFO_CAPTURECOUNT: u32 = 4u32;
+const PCRE2_CONFIG_VERSION: u32 = 11u32;
+
+# Własne kody wrappera (dodatnie, poza zakresem kodów PCRE2 dopasowania).
+const ZWOLNIONY: i64 = 1001;
+const ZLE_PRZESUNIECIE: i64 = 1002;
+const ZLE_OPCJE: i64 = 1003;
+const BRAK_PAMIECI: i64 = 1004;
+
+class BladKompilacji {
+    kod: i64 = 0;              # kod PCRE2 (np. 114) albo kod wrappera
+    opis: String;              # opis z pcre2_get_error_message
+    pozycja: i64 = -1;         # pozycja błędu we wzorcu, w bajtach
+}
+
+class Wzorzec {
+    uchwyt: u64 = 0u64;        # wewnętrzne: pcre2_code
+    dane: u64 = 0u64;          # wewnętrzne: pcre2_match_data
+    zrodlo: String;            # tekst wzorca
+    opcje: i64 = 0;
+    grupy: i64 = 0;            # liczba grup przechwytujących (bez grupy 0)
+    ok: bool = false;          # czy kompilacja się udała
+    blad: BladKompilacji;
+}
+
+class Grupa {
+    uczestniczy: bool = false;
+    poczatek: i64 = -1;        # w bajtach
+    koniec: i64 = -1;          # w bajtach, za ostatnim bajtem
+    tekst: String;
+}
+
+class Dopasowanie {
+    ok: bool = false;          # false: błąd (opis w blad); true: wynik poprawny
+    znaleziono: bool = false;  # przy ok: czy wzorzec pasuje
+    grupy: List[Grupa];        # grupa 0 = całe dopasowanie; długość = 1 + liczba grup wzorca
+    kodBledu: i64 = 0;
+    blad: String;
+    pozycjaBledu: i64 = -1;    # np. bajt z niepoprawnym UTF-8
+}
+
+fun zakonczZerem(s: str) -> String = {
+    var w: String;
+    w.append(s);
+    w.append('\0');
+    return w;
+}
+
+fun opisBledu(kod: i64) -> String = {
+    var bufor: u8[256];
+    let n = pcre2_get_error_message_8(kod as i32, &bufor[0] as cptr u8, 256u64) as i64;
+    var w: String;
+    if (n < 0) {
+        w.append(f"nieznany kod bledu {kod}");
+        return w;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        w.append(bufor[i] as char);
+        i += 1;
+    }
+    return w;
+}
+
+# Wersja biblioteki, np. "10.45 2025-02-05".
+fun wersjaBiblioteki() -> String = {
+    var bufor: u8[64];
+    let n = pcre2_config_8(PCRE2_CONFIG_VERSION, &bufor[0] as cptr u8) as i64;
+    var w: String;
+    var i: i64 = 0;
+    while (i < n - 1 and i < 64) {
+        w.append(bufor[i] as char);
+        i += 1;
+    }
+    return w;
+}
+
+fun jestBledemUtf8(kod: i64) -> bool = kod >= BLAD_UTF8_OD and kod <= BLAD_UTF8_DO;
+
+#{
+    Kompiluje wzorzec. Przy błędzie wynik ma ok = false, a blad podaje kod PCRE2, opis
+    i pozycję we wzorcu (w bajtach). Wzorzec może zawierać bajt NUL (długość jest jawna).
+#}
+fun kompiluj(wzorzec: str, opcje: i64) -> Wzorzec = {
+    var w: Wzorzec;
+    w.zrodlo.append(wzorzec);
+    w.opcje = opcje;
+    if (opcje < 0 or (opcje | DOZWOLONE_OPCJE) != DOZWOLONE_OPCJE) {
+        w.blad.kod = ZLE_OPCJE;
+        w.blad.opis.append(f"nieobslugiwane opcje kompilacji {opcje}");
+        return w;
+    }
+    let zrodlo = zakonczZerem(wzorzec);
+    var kod: i32 = 0i32;
+    var pozycja: u64 = 0u64;
+    let uchwyt = pcre2_compile_8(builtins.ptr_from_slice[char](zrodlo.asSlice()) as cptr char, wzorzec.length() as u64,
+                                 opcje as u32, &kod as cptr i32, &pozycja as cptr u64, 0u64);
+    if (uchwyt == 0u64) {
+        w.blad.kod = kod as i64;
+        w.blad.opis = opisBledu(kod as i64);
+        w.blad.pozycja = pozycja as i64;
+        return w;
+    }
+    let dane = pcre2_match_data_create_from_pattern_8(uchwyt, 0u64);
+    if (dane == 0u64) {
+        pcre2_code_free_8(uchwyt);
+        w.blad.kod = BRAK_PAMIECI;
+        w.blad.opis.append("brak pamieci na bufor dopasowania");
+        return w;
+    }
+    var liczba: u32 = 0u32;
+    pcre2_pattern_info_8(uchwyt, PCRE2_INFO_CAPTURECOUNT, &liczba as cptr u32);
+    w.uchwyt = uchwyt;
+    w.dane = dane;
+    w.grupy = liczba as i64;
+    w.ok = true;
+    return w;
+}
+
+fun aktywny(w: ref Wzorzec) -> bool = w.uchwyt != 0u64;
+
+# Zwalnia wzorzec i bufor dopasowania. Zwraca false, gdy wzorzec nie był aktywny.
+fun zwolnij(w: ref Wzorzec) -> bool = {
+    if (w.uchwyt == 0u64) return false;
+    pcre2_match_data_free_8(w.dane);
+    pcre2_code_free_8(w.uchwyt);
+    w.dane = 0u64;
+    w.uchwyt = 0u64;
+    return true;
+}
+
+fun bladDopasowania(kod: i64, opis: str) -> Dopasowanie = {
+    var d: Dopasowanie;
+    d.kodBledu = kod;
+    d.blad.append(opis);
+    return d;
+}
+
+fun wycinek(tekst: str, od: i64, ile: i64) -> String = {
+    var w: String;
+    var i: i64 = 0;
+    while (i < ile) {
+        w.append(tekst[od + i]);
+        i += 1;
+    }
+    return w;
+}
+
+#{
+    Szuka pierwszego dopasowania od bajtu start (0..długość tekstu). Wynik:
+    * ok = true, znaleziono = true  - grupy wypełnione (kopie przesunięć i tekstów),
+    * ok = true, znaleziono = false - brak dopasowania (to nie błąd),
+    * ok = false - błąd: niepoprawny UTF-8 w tekście (kod -3..-23, pozycjaBledu), start
+      w środku znaku UTF-8 (-36), start poza tekstem, zwolniony wzorzec.
+#}
+fun dopasuj(w: ref Wzorzec, tekst: str, start: i64) -> Dopasowanie = {
+    if (not aktywny(w)) return bladDopasowania(ZWOLNIONY, "wzorzec nie jest skompilowany albo zostal zwolniony");
+    if (start < 0 or start > tekst.length()) {
+        return bladDopasowania(ZLE_PRZESUNIECIE, f"start {start} poza tekstem (0..{tekst.length()})".asSlice());
+    }
+    let kopia = zakonczZerem(tekst);
+    let wynik = pcre2_match_8(w.uchwyt, builtins.ptr_from_slice[char](kopia.asSlice()) as cptr char, tekst.length() as u64,
+                              start as u64, 0u32, w.dane, 0u64) as i64;
+    let wektor = pcre2_get_ovector_pointer_8(w.dane) as manyptr u64;
+    var d: Dopasowanie;
+    if (wynik == BRAK_DOPASOWANIA) {
+        d.ok = true;
+        return d;
+    }
+    if (wynik < 0) {
+        d.kodBledu = wynik;
+        d.blad = opisBledu(wynik);
+        # Po błędzie UTF-8 pozycję błędnego znaku podaje pcre2_get_startchar (dokumentacja pcre2api).
+        if (jestBledemUtf8(wynik)) d.pozycjaBledu = pcre2_get_startchar_8(w.dane) as i64;
+        return d;
+    }
+    d.ok = true;
+    d.znaleziono = true;
+    var g: i64 = 0;
+    while (g <= w.grupy) {
+        var grupa: Grupa;
+        if (g < wynik) {
+            let od = wektor[2 * g];
+            let doKonca = wektor[2 * g + 1];
+            if (od != NIEUSTAWIONE and doKonca != NIEUSTAWIONE and doKonca >= od) {
+                grupa.uczestniczy = true;
+                grupa.poczatek = od as i64;
+                grupa.koniec = doKonca as i64;
+                grupa.tekst = wycinek(tekst, grupa.poczatek, grupa.koniec - grupa.poczatek);
+            }
+        }
+        d.grupy.push(move grupa);
+        g += 1;
+    }
+    return d;
+}
+
+# Długość znaku UTF-8 zaczynającego się bajtem b (1 dla bajtów spoza UTF-8).
+fun dlugoscZnaku(b: u8) -> i64 = {
+    if (b < 128u8) return 1;
+    if (b >= 240u8) return 4;
+    if (b >= 224u8) return 3;
+    if (b >= 192u8) return 2;
+    return 1;
+}
+
+#{
+    Wszystkie kolejne, nienakładające się dopasowania. Po pustym dopasowaniu szukanie
+    przesuwa się o jeden znak (w trybie UTF-8 o cały znak, nie o bajt), więc pętla
+    zawsze się kończy. Przy błędzie lista kończy się elementem z ok = false.
+#}
+fun wszystkie(w: ref Wzorzec, tekst: str) -> List[Dopasowanie] = {
+    var lista: List[Dopasowanie];
+    var start: i64 = 0;
+    var dalej = true;
+    while (dalej and start <= tekst.length()) {
+        var d = dopasuj(w, tekst, start);
+        if (not d.ok) {
+            lista.push(move d);
+            dalej = false;
+        } else if (not d.znaleziono) {
+            dalej = false;
+        } else {
+            let koniec = d.grupy.at(0).koniec;
+            if (koniec == d.grupy.at(0).poczatek) {
+                if (koniec >= tekst.length()) {
+                    dalej = false;
+                } else if ((w.opcje & UTF8) != 0) {
+                    start = koniec + dlugoscZnaku(tekst[koniec] as u8);
+                } else {
+                    start = koniec + 1;
+                }
+            } else {
+                start = koniec;
+            }
+            lista.push(move d);
+        }
+    }
+    return lista;
+}
+
+# Numer grupy nazwanej (?<nazwa>...); -1, gdy takiej grupy nie ma.
+fun numerGrupy(w: ref Wzorzec, nazwa: str) -> i64 = {
+    if (not aktywny(w)) return -1;
+    let n = zakonczZerem(nazwa);
+    let wynik = pcre2_substring_number_from_name_8(w.uchwyt, builtins.ptr_from_slice[char](n.asSlice()) as cptr char) as i64;
+    if (wynik < 0) return -1;
+    return wynik;
+}
+
+# Tekst grupy n (pusty, gdy grupa nie wzięła udziału albo n jest poza zakresem).
+fun tekstGrupy(d: ref Dopasowanie, n: i64) -> String = {
+    var w: String;
+    if (n < 0 or n >= d.grupy.length()) return w;
+    w.append(d.grupy.at(n).tekst.asSlice());
+    return w;
+}
