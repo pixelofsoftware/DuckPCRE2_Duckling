@@ -1,5 +1,7 @@
 # DuckPCRE2: wrapper PCRE2 dla Ducklinga
 
+![Napisane w Duckling](https://img.shields.io/badge/napisane%20w-Duckling-f2c94c)
+
 Zespół: Pixel of Software (Marcin Kowalczyk). Temat: P02 DuckBridge, biblioteka PCRE2 (poziom 2). Skład: 1 osoba.
 
 Moduł `regex` (`app/regex.dk`) udostępnia w Ducklingu wyrażenia regularne przez 8-bitowe API biblioteki C PCRE2:
